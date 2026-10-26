@@ -1,0 +1,32 @@
+# Unrelated file, never commit
+vizuara_courses_dummy_dataset_150.csv
+
+# Secrets (the .env.example files ARE committed)
+.env
+.env.*
+!.env.example
+# Google OAuth client file downloaded from Cloud Console
+client_secret*.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node / Next.js (frontend/.gitignore has more)
+node_modules/
+
+# Screenshots dropped in the repo root while debugging
+/*.png
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Supabase CLI local files
+supabase/.branches
+supabase/.temp

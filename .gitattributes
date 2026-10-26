@@ -1,0 +1,7 @@
+# Always use Linux-style line endings (LF), so files are identical on Windows,
+# GitHub CI and the Linux servers on Railway/Vercel.
+* text=auto eol=lf
+
+# Binary files: never touch.
+*.ico binary
+*.png binary

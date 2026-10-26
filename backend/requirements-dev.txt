@@ -1,0 +1,5 @@
+# Extra packages for development and CI only (tests + lint).
+-r requirements.txt
+pytest==9.1.1
+httpx2==2.16.0  # used by FastAPI's TestClient
+ruff==0.17.2    # linter and formatter

@@ -1,0 +1,5 @@
+# Packages the backend needs to run (installed in Docker and on Railway).
+fastapi==0.162.0
+uvicorn[standard]==0.54.0
+pydantic-settings==2.16.1   # reads settings from environment variables / .env
+pyjwt[crypto]==2.15.1       # verifies Supabase login tokens

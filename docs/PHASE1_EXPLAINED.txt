@@ -1,0 +1,611 @@
+===============================================================================
+ INBOX2OFFER - PHASE 1 EXPLAINED FROM THE BASICS
+ What we built, why every step was needed, and how login actually works
+===============================================================================
+
+How to read this file
+---------------------
+Read it top to bottom once. Each part builds on the previous one.
+Words in CAPITALS are explained in the GLOSSARY at the end.
+
+  PART 1   The big picture: what are all these pieces?
+  PART 2   Two questions every app must answer: "who are you?" and "are you allowed?"
+  PART 3   What is OAuth? (the "Login with Google" idea)
+  PART 4   Why did we set up Google Cloud Console?
+  PART 5   Why Supabase sits in the middle (and not the frontend)
+  PART 6   The full login journey, step by step
+  PART 7   What is a JWT (the "login token")?
+  PART 8   The owner-only lock: 4 layers, and why we need all of them
+  PART 9   The backend files, one by one
+  PART 10  The frontend files, one by one
+  PART 11  The database file (migration)
+  PART 12  Keys and secrets: which are public, which are dangerous
+  PART 13  CORS: why the backend refuses other websites
+  PART 14  CI, Docker and .gitignore
+  PART 15  The "Date.now()" error we fixed
+  PART 16  Login is NOT Gmail access (preview of Phase 2)
+  GLOSSARY
+
+
+===============================================================================
+ PART 1 - THE BIG PICTURE: WHAT ARE ALL THESE PIECES?
+===============================================================================
+
+Think of the app as a small private office.
+
+  +-------------------+     +-------------------+     +-------------------+
+  |  FRONTEND         |     |  BACKEND          |     |  SUPABASE         |
+  |  (Next.js)        |     |  (FastAPI/Python) |     |                   |
+  |                   |     |                   |     |  - Auth (login)   |
+  |  The reception    |---->|  The back office  |---->|  - Database       |
+  |  desk. What you   |     |  The brain. Does  |     |    (Postgres)     |
+  |  see and click.   |     |  the real work.   |     |  The ID office +  |
+  |  localhost:3000   |     |  localhost:8000   |     |  the filing room  |
+  +-------------------+     +-------------------+     +-------------------+
+            |                                                  |
+            |                +-------------------+             |
+            +--------------->|  GOOGLE           |<------------+
+                             |  Proves who you   |
+                             |  are (your Gmail) |
+                             +-------------------+
+
+- FRONTEND (frontend/ folder): the website pages in your browser.
+- BACKEND  (backend/ folder): the Python server. Later it will read Gmail,
+  call the AI, score jobs and draft replies.
+- SUPABASE: a hosted service that gives us two things:
+    1. AUTH     - handles "Login with Google" for us.
+    2. DATABASE - Postgres, where all data will be stored.
+- GOOGLE: the one who actually checks your Gmail password. Our app never
+  sees your Google password.
+
+
+===============================================================================
+ PART 2 - TWO QUESTIONS EVERY APP MUST ANSWER
+===============================================================================
+
+Every private app must answer two different questions:
+
+  1. AUTHENTICATION = "Who are you?"
+     Proving identity. Example: showing your Aadhaar card at the airport.
+
+  2. AUTHORIZATION  = "Are you allowed in?"
+     Checking permission. Example: the airport checks you have a ticket
+     for THIS flight. A valid Aadhaar alone does not let you board.
+
+In our app:
+  - Google + Supabase answer question 1: "This person is <some gmail>."
+  - OUR CODE answers question 2: "Is that gmail the OWNER_EMAIL? If not, no entry."
+
+This is why "Login with Google" alone is NOT enough. Anyone in the world
+with a Google account can prove who they are. We still have to say
+"but only THIS one person is allowed in". That is the owner allowlist.
+
+The two HTTP error codes match the two questions:
+  401 Unauthorized = "I don't know who you are" (no token, fake token, expired)
+  403 Forbidden    = "I know who you are, but you are not allowed"
+
+
+===============================================================================
+ PART 3 - WHAT IS OAUTH? (THE "LOGIN WITH GOOGLE" IDEA)
+===============================================================================
+
+The old, bad way: a website asks for your Gmail password. Then that website
+knows your password forever. If it gets hacked, your Gmail is gone.
+
+OAuth is the safe way. The idea, using a hotel analogy:
+
+  - You arrive at a hotel (our app).
+  - The hotel does NOT ask for your house keys (your Google password).
+  - Instead, the hotel sends you to a trusted government office (Google).
+  - You prove who you are at the government office, NOT at the hotel.
+  - The office gives you a sealed letter saying "this person is X".
+  - You bring the letter back to the hotel. The hotel can check the
+    seal is real, but it never learned your password.
+
+That is OAuth in one sentence:
+  "Let a trusted party (Google) vouch for you, so the app never sees
+   your password."
+
+Two important rules make this safe:
+  a) Google only talks to apps that registered with it first.
+     (That is why we used Google Cloud Console - PART 4.)
+  b) Google only sends the "sealed letter" back to addresses that the app
+     registered in advance (the REDIRECT URI).
+     So a thief cannot trick Google into sending your letter to them.
+
+
+===============================================================================
+ PART 4 - WHY DID WE SET UP GOOGLE CLOUD CONSOLE?
+===============================================================================
+
+Google will not let a random website show a "Login with Google" button.
+The website must register first, like a shop registering for a licence.
+
+What we created there, and why:
+
+  1. A PROJECT ("My First Project")
+     Just a folder in Google's system that holds our settings.
+     The name does not matter.
+
+  2. OAUTH CONSENT SCREEN (also called "Google Auth Platform")
+     The popup you saw: "Inbox2Offer wants to access your Google account".
+     Google needs an app name and support email to show to the user.
+     - "External"  = any Google account *could* try to log in
+     - "Testing"   = while testing, ONLY the TEST USERS you added can log in.
+                     That is why we added your Gmail as a test user.
+                     It is also why you saw "Google hasn't verified this app".
+                     That warning is normal for an app in testing mode.
+
+  3. OAUTH CLIENT (type: Web application)
+     This gave us two values:
+       - CLIENT ID     : the app's public name tag. Not secret.
+       - CLIENT SECRET : the app's password with Google. SECRET.
+     And we told Google two addresses:
+       - Authorized JavaScript origin: http://localhost:3000
+           "Login can be started from this website."
+       - Authorized redirect URI:
+           https://<project-ref>.supabase.co/auth/v1/callback
+           "After login, send the user back ONLY to this address."
+         <project-ref> is your Supabase project's ID, the random part at
+         the start of your Supabase URL.
+
+  Notice: the redirect URI points to SUPABASE, not to our frontend.
+  PART 5 explains why.
+
+The downloaded client_secret_....json file just contains these same values.
+We copied the Client ID and Client Secret into Supabase, so Supabase can
+talk to Google on our behalf. Keep that file private, like a password.
+
+
+===============================================================================
+ PART 5 - WHY SUPABASE SITS IN THE MIDDLE (AND NOT THE FRONTEND)
+===============================================================================
+
+This is the question "why did we give the Google keys to Supabase instead
+of putting them in the frontend?"
+
+REASON 1: THE FRONTEND CANNOT KEEP A SECRET
+  Everything in the frontend is downloaded into the visitor's browser.
+  Anyone can press F12 (Developer Tools) and read all of it.
+  If the CLIENT SECRET were in the frontend, every visitor could copy it
+  and pretend to be our app to Google.
+  => A secret must live on a SERVER. Supabase Auth is that server.
+
+  Rule to remember:
+     Frontend = public. Never put secrets there.
+     Server (Supabase, our backend) = private. Secrets live there.
+
+REASON 2: SOMEONE HAS TO TURN GOOGLE'S ANSWER INTO A LOGIN SESSION
+  Google's answer ("this is X") has to be checked using the client secret,
+  and then turned into a login session for our app.
+  Supabase does all of that: it verifies Google's answer, creates a user
+  record, and issues OUR OWN login token (a JWT, see PART 7).
+
+REASON 3: ONE TOKEN THAT EVERYONE UNDERSTANDS
+  The token Supabase issues is understood by:
+    - the frontend      (to know you are logged in),
+    - our backend       (it can verify the token's signature),
+    - the database      (Row Level Security reads your email from it).
+  One login token works across the whole system.
+
+REASON 4: WE DON'T WRITE SECURITY CODE WE DON'T NEED TO
+  Building our own login server (storing sessions, refreshing tokens,
+  rotating keys, handling Google's protocol) is a lot of work and easy to
+  get wrong. Supabase does it for free, and does it well.
+
+So the division of work is:
+  Google   -> checks your password, says "this is X"
+  Supabase -> holds the client secret, verifies Google, issues our token
+  Frontend -> shows the button, stores the token in a cookie, sends it along
+  Backend  -> verifies the token and enforces "owner only"
+  Database -> also enforces "owner only" (RLS)
+
+
+===============================================================================
+ PART 6 - THE FULL LOGIN JOURNEY, STEP BY STEP
+===============================================================================
+
+Here is exactly what happens when you click "Continue with Google".
+
+  YOU / BROWSER          FRONTEND           SUPABASE AUTH          GOOGLE
+  (localhost:3000)       (Next.js server)   (<ref>.supabase.co)
+
+  1. Click "Continue with Google" on /login
+        |
+        |---- 2. "Start Google login, then come back to
+        |         localhost:3000/auth/callback" ------------>|
+        |                                                    |
+        |<--- 3. "Go to Google" (redirect) ------------------|
+        |
+        |---- 4. Browser opens Google's login page ---------------------->|
+        |        You pick your Gmail, type password (only Google sees it) |
+        |                                                                 |
+        |<--- 5. Google redirects to the REDIRECT URI:                    |
+        |        <ref>.supabase.co/auth/v1/callback?code=....  -----------|
+        |
+        |---- 6. Browser goes there ------------------------>|
+        |                                    7. Supabase uses the CLIENT
+        |                                       SECRET to confirm with Google
+        |                                       "is this code real? whose?"
+        |                                    8. Before creating a NEW user,
+        |                                       Supabase runs our HOOK:
+        |                                       "is this the owner? if not,
+        |                                       refuse." (Layer 4, PART 8)
+        |<--- 9. Redirect to localhost:3000/auth/callback?code=xyz
+        |
+        |---- 10. Browser opens /auth/callback --->|
+        |                         11. Our callback route (route.ts) swaps
+        |                             the one-time code for a SESSION
+        |                             (access token + refresh token),
+        |                             stored in a COOKIE.
+        |                         12. It checks: email == OWNER_EMAIL?
+        |                             - No  -> sign out, go to /access-denied
+        |                             - Yes -> go to /dashboard
+        |
+        |---- 13. Browser opens /dashboard --->|
+        |                         14. proxy.ts runs first: valid login?
+        |                             owner? If yes, show the page.
+        |
+        |---- 15. Dashboard calls the BACKEND:  GET localhost:8000/api/me
+        |         with header  "Authorization: Bearer <access token>"
+        |                                      16. Backend checks the token's
+        |                                          signature + expiry + email.
+        |<--- 17. {"email": "<your gmail>"} -> "Connected. Backend confirmed..."
+
+Why the "code" step (steps 5-11)? Why not send the token directly?
+  A code in a URL can leak (browser history, logs). So the URL only carries
+  a short-lived, ONE-TIME code. It is useless on its own: it must be swapped
+  for the real token by a request that the attacker cannot repeat.
+  (The technical name for this safety trick is PKCE.)
+
+
+===============================================================================
+ PART 7 - WHAT IS A JWT (THE "LOGIN TOKEN")?
+===============================================================================
+
+After login, Supabase gives the browser an ACCESS TOKEN. It is a JWT
+(JSON Web Token): a long string with 3 parts separated by dots:
+
+     eyJhbGciOi....   .   eyJlbWFpbCI6....   .   Xk3f9aB....
+       HEADER                PAYLOAD               SIGNATURE
+     (how it's signed)   (the "claims")       (the tamper-proof seal)
+
+The PAYLOAD (claims) is just readable JSON, for example:
+     {
+       "email": "someone@gmail.com",
+       "aud":   "authenticated",                       <- a logged-in user
+       "iss":   "https://<ref>.supabase.co/auth/v1",   <- who issued it
+       "exp":   1792900000                             <- expiry time
+     }
+
+IMPORTANT: anyone can READ a JWT. It is not encrypted. What makes it safe
+is the SIGNATURE:
+  - Supabase signs the token with a PRIVATE KEY that only Supabase has.
+  - Anyone can check the signature with the matching PUBLIC KEY.
+  - If someone changes even one letter (e.g. swaps in the owner's email),
+    the signature no longer matches and we reject the token.
+
+  Analogy: a wax seal on a letter. Everyone can read the letter and look
+  at the seal, but only the king has the ring to MAKE that seal.
+
+Your project uses the modern "ES256" signing (private/public key pair).
+Supabase publishes its public keys at:
+     https://<ref>.supabase.co/auth/v1/.well-known/jwks.json
+Our backend downloads them from there to check signatures. That is why we
+did NOT need a "JWT secret" in backend/.env.
+
+Tokens expire (usually after 1 hour). The frontend quietly uses a
+REFRESH TOKEN to get a new access token. That is "session refresh",
+handled by the Supabase library and by proxy.ts.
+
+
+===============================================================================
+ PART 8 - THE OWNER-ONLY LOCK: 4 LAYERS, AND WHY WE NEED ALL OF THEM
+===============================================================================
+
+Security rule: never trust a single wall. If one layer has a bug, the next
+one still stops the intruder. (Like a bank: gate guard + locked door + vault.)
+
+  LAYER 4 (outermost) - SUPABASE HOOK  "Don't even create the account"
+    File: supabase/migrations/..._owner_and_rls.sql (hook_before_user_created)
+    When a NEW person logs in for the first time, Supabase asks our hook
+    "may I create this user?". The hook says NO unless it is the owner.
+    Result: strangers never get an account at all.
+
+  LAYER 1 - FRONTEND  "Polite bouncer"  (for user experience only)
+    Files: frontend/app/auth/callback/route.ts, frontend/proxy.ts,
+           frontend/lib/owner.ts
+    If the logged-in email is not the owner: sign out, show "Access denied".
+    This only makes the website behave nicely. It is NOT real security,
+    because a clever attacker can skip the website and call the backend
+    or database directly.
+
+  LAYER 2 - BACKEND  "The real security guard"
+    File: backend/app/auth.py (require_owner)
+    Every /api/... request must carry a valid, signed, unexpired token
+    whose email is OWNER_EMAIL. Otherwise 401 or 403.
+    This is the real boundary, because all data access goes through it.
+
+  LAYER 3 - DATABASE  "The vault door" (RLS = Row Level Security)
+    File: supabase/migrations/..._owner_and_rls.sql (is_owner)
+    Even if someone talks to the database directly with the public key,
+    the database itself checks "is this the owner?" for every row.
+    From Phase 2 onwards, every new table gets this rule.
+
+Why did we keep OWNER_EMAIL off the browser?
+  In the frontend, the owner check runs on the Next.js SERVER (proxy.ts and
+  the callback route), not in browser JavaScript. So your email is never
+  shipped to visitors' browsers. The variable has no NEXT_PUBLIC_ prefix.
+  In Next.js, only NEXT_PUBLIC_ variables are sent to the browser.
+
+
+===============================================================================
+ PART 9 - THE BACKEND FILES, ONE BY ONE   (backend/)
+===============================================================================
+
+  app/config.py
+    Reads settings (OWNER_EMAIL, SUPABASE_URL, ...) from environment
+    variables or backend/.env, in ONE place. The rest of the code asks
+    config.py instead of reading the environment itself.
+
+  app/auth.py   <- the most important file in Phase 1
+    decode_supabase_token(token):
+      1. Looks at which signing method the token says it uses.
+         Only HS256, ES256 and RS256 are accepted. "none" (no signature)
+         is rejected.
+      2. Gets the right key (Supabase's public key, or the shared secret
+         for older projects).
+      3. jwt.decode(...) checks the signature, expiry ("exp"), audience
+         ("authenticated") and issuer (must be OUR Supabase project, so a
+         token from someone else's Supabase project is rejected).
+    require_owner(...):
+      - no token            -> 401
+      - bad/expired token   -> 401
+      - email != owner      -> 403
+      - otherwise           -> allowed
+
+  app/main.py
+    Creates the FastAPI app.
+    - /health: public, so Railway can check the server is alive.
+    - private_api: a group of routes under /api. The owner check is
+      attached to the WHOLE group, so a future endpoint cannot forget it.
+    - CORS settings (see PART 13).
+
+  app/routes/me.py
+    GET /api/me: returns your email. A tiny test endpoint proving the full
+    chain works. The dashboard's "Connected..." message comes from here.
+
+  tests/
+    Tests create their own fake tokens (signed with a test key) and check:
+    owner -> 200, stranger -> 403, expired/forged/unsigned/missing -> 401,
+    token from another Supabase project -> 401.
+    One "safety net" test walks through EVERY /api route and fails if any
+    of them can be opened without logging in.
+
+  requirements.txt / requirements-dev.txt
+    The list of Python packages (pip). The -dev file adds test/lint tools.
+
+  Dockerfile
+    A recipe to package the backend into a container (see PART 14).
+
+
+===============================================================================
+ PART 10 - THE FRONTEND FILES, ONE BY ONE   (frontend/)
+===============================================================================
+
+  app/page.tsx              Landing page (public). "Owner login" button.
+  app/login/page.tsx        The "Continue with Google" button. It calls
+                            supabase.auth.signInWithOAuth({provider:"google"})
+                            and says "come back to /auth/callback".
+  app/auth/callback/route.ts
+                            Not a page: a small server function. It receives
+                            the one-time code, swaps it for a session cookie,
+                            then checks the owner (PART 6, steps 10-12).
+  app/dashboard/page.tsx    The private page. Checks the owner AGAIN on the
+                            server (defence in depth), shows your email.
+  app/access-denied/page.tsx  Shown to anyone who is not the owner.
+  app/layout.tsx            The frame around every page: header, dark mode.
+
+  proxy.ts                  Runs on the Next.js server BEFORE every page.
+                            (In Next.js 16, "middleware" was renamed "proxy".)
+                            1. Refreshes your login cookie when needed.
+                            2. /dashboard: not logged in -> /login,
+                               not the owner -> sign out -> /access-denied.
+
+  lib/owner.ts              isOwnerEmail(email, ownerEmail): one small
+                            function, used everywhere, with its own tests
+                            (lib/owner.test.ts). It ignores upper case and
+                            spaces.
+  lib/supabase/client.ts    Supabase connection for code in the BROWSER.
+  lib/supabase/server.ts    Supabase connection for code on the SERVER.
+                            (They differ in how they read the login cookie.)
+
+  components/backend-check.tsx   Calls the backend's /api/me with your token.
+  components/logout-button.tsx   Signs out.
+  components/theme-toggle.tsx    Dark/light mode switch.
+
+Why a COOKIE for the session?
+  The Next.js server (proxy.ts, the dashboard) needs to know who you are
+  BEFORE sending the page. Browsers send cookies automatically with every
+  request, so the server can read your login from them.
+
+
+===============================================================================
+ PART 11 - THE DATABASE FILE (MIGRATION)
+===============================================================================
+
+A MIGRATION is a numbered SQL file that changes the database. Keeping them
+as files means the database setup is versioned in git and repeatable.
+(If you ever create a new Supabase project, you just run them in order.)
+
+supabase/migrations/20261024000000_owner_and_rls.sql creates:
+
+  1. Table app_owner (one row: the owner's email)
+     - "check (id)" trick: the table can never hold a 2nd row.
+     - RLS is ON with no rules, so nobody can read or change it through
+       the public API. We checked: the public gets an empty list [].
+     - We inserted your email by hand in the SQL Editor, so your email is
+       NOT written in any file in git (the repo can be public).
+
+  2. Function is_owner()
+     Returns true only if the email inside the current login token equals
+     the owner's email. Every future table will use it in its RLS rule:
+        "owner only: using (public.is_owner())"
+
+  3. Function hook_before_user_created(event)
+     Layer 4 from PART 8. Supabase calls it before creating any new user.
+     The owner gets {} (allowed). Anyone else gets an error (403).
+     Only Supabase's own auth service may call it, not normal users.
+     We checked: the public gets 401.
+
+
+===============================================================================
+ PART 12 - KEYS AND SECRETS: WHICH ARE PUBLIC, WHICH ARE DANGEROUS
+===============================================================================
+
+  SAFE TO BE PUBLIC (designed to be seen in the browser):
+    - Supabase Project URL        https://<ref>.supabase.co
+    - Supabase PUBLISHABLE key    sb_publishable_...
+        Lets the browser talk to Supabase AS AN ORDINARY VISITOR.
+        RLS rules still apply, so it cannot see private data.
+    - Google CLIENT ID
+
+  SECRET (never in the frontend, never in git, never in chat):
+    - Google CLIENT SECRET        -> lives only inside Supabase settings
+    - Supabase SERVICE-ROLE / SECRET key
+        The master key. It IGNORES all RLS rules. Only the backend will
+        use it, starting in Phase 2. It will be stored in Railway's
+        settings, never in code.
+    - Supabase DATABASE PASSWORD  -> full direct access to the database
+    - (Phase 2) the Gmail refresh token -> stored ENCRYPTED in the database
+
+Where do the values live?
+  - backend/.env           -> backend settings on YOUR machine
+  - frontend/.env.local    -> frontend settings on YOUR machine
+  - .env.example files     -> templates with FAKE values, committed to git
+                              so others know which settings exist
+  - .gitignore makes sure the real .env files are never committed.
+  - In production, the same values are typed into the Railway and Vercel
+    dashboards instead of .env files.
+
+
+===============================================================================
+ PART 13 - CORS: WHY THE BACKEND REFUSES OTHER WEBSITES
+===============================================================================
+
+Browsers have a safety rule: a page from website A cannot freely call an
+API on website B, unless B says "I allow A". That permission is CORS.
+
+Our backend says: "I only allow requests from FRONTEND_ORIGIN"
+(http://localhost:3000 now, your Vercel address later).
+
+We tested it: a request from a fake site got 400 (refused), and our
+frontend got 200.
+
+Why it matters: if you are logged in and visit a malicious website, that
+site's JavaScript cannot use your browser to call our backend.
+
+
+===============================================================================
+ PART 14 - CI, DOCKER AND .GITIGNORE
+===============================================================================
+
+  CI (GitHub Actions, .github/workflows/ci.yml)
+    Every time code is pushed to GitHub, GitHub runs, on its own machines:
+      backend : ruff (lint = style/bug checker) + pytest (tests)
+      frontend: eslint (lint) + vitest (tests) + a production build
+    If anything fails, GitHub shows a red X. This catches mistakes before
+    they reach the live site, e.g. someone weakening the owner check.
+
+  DOCKER (backend/Dockerfile, docker-compose.yml)
+    A "lunchbox" that packs the backend with the exact Python version and
+    packages it needs. The same box runs on your laptop and on Railway, so
+    "it works on my machine" also works in production.
+    (Docker Desktop was not running, so this part is not tested yet.)
+
+  .GITIGNORE
+    A list of files git must never upload: .env secrets, the .venv and
+    node_modules folders (huge, re-downloadable), screenshots, and the
+    unrelated CSV file.
+
+
+===============================================================================
+ PART 15 - THE "Date.now()" ERROR WE FIXED
+===============================================================================
+
+Next.js 16 tries to BUILD pages AHEAD OF TIME to make them fast. While doing
+that on /dashboard, it noticed the login check reads the current time
+(to see if your token has expired). "What time is it now?" cannot be known
+ahead of time, so Next.js stopped and showed the red error.
+
+Fix (one line in app/dashboard/page.tsx):
+     await connection();
+It means: "wait for a real visitor's request before running this part."
+The page's outer frame is still pre-built (fast). Only the login part waits.
+(That is also why the login part sits inside <Suspense>: it shows
+"Loading..." for a moment while the server checks your login.)
+
+
+===============================================================================
+ PART 16 - LOGIN IS NOT GMAIL ACCESS  (preview of Phase 2)
+===============================================================================
+
+Right now, Google login only told us WHO you are
+(scopes: openid, email, profile). It gave the app NO access to your emails.
+
+In Phase 2 we add a SEPARATE button, "Connect Gmail":
+  - It asks Google for Gmail permissions: read mail (gmail.readonly) and
+    create drafts (gmail.compose).
+  - It asks for "offline access" = a REFRESH TOKEN that lets the BACKEND
+    WORKER read new emails every 5 minutes, even when you are not logged in
+    to the website.
+  - That flow is handled by our BACKEND (not Supabase), because only the
+    backend's worker needs the Gmail token, and it must be stored
+    ENCRYPTED in the database.
+  - The connected Gmail must be the owner's email; any other is refused.
+
+Why keep them separate?
+  Login happens often and should be harmless. Gmail access is powerful and
+  long-lived, so it gets its own step, its own storage and its own checks.
+  It reuses the same Google Cloud project, so step B was not wasted.
+
+
+===============================================================================
+ GLOSSARY
+===============================================================================
+
+ ACCESS TOKEN     Short-lived login proof (a JWT, about 1 hour), sent with
+                  each request as "Authorization: Bearer <token>".
+ API              The list of addresses a server answers, e.g. GET /api/me.
+ AUTHENTICATION   Proving who you are.
+ AUTHORIZATION    Checking what you are allowed to do.
+ CLAIMS           The data inside a JWT (email, expiry, issuer...).
+ CLIENT ID        Public name tag of our app at Google.
+ CLIENT SECRET    Password of our app at Google. Kept only in Supabase.
+ COOKIE           Small value the browser stores and sends automatically
+                  with every request to the same site. Holds our session.
+ CORS             Browser rule about which websites may call our API.
+ ENV VARIABLE     A setting given to a program from outside the code
+                  (.env file locally, dashboard settings in production).
+ JWKS             The published list of a service's PUBLIC signing keys.
+ JWT              JSON Web Token: readable data + a tamper-proof signature.
+ MIGRATION        A versioned SQL file that changes the database structure.
+ OAUTH            Standard way to log in through a trusted party (Google)
+                  without giving the app your password.
+ PKCE             The trick of sending only a one-time code in the URL and
+                  swapping it for the token separately.
+ PRIVATE KEY      Secret key used to MAKE signatures. Only Supabase has it.
+ PUBLIC KEY       Key anyone can use to CHECK a signature.
+ REDIRECT URI     The only address Google may send the user back to.
+ REFRESH TOKEN    Long-lived token used to get new access tokens quietly.
+ RLS              Row Level Security: the database itself checks, for every
+                  row, whether the current user may see or change it.
+ SCOPE            A specific permission asked from Google (email, Gmail...).
+ SESSION          "You are logged in" state: access token + refresh token.
+ TEST USERS       Google accounts allowed to use an OAuth app that is still
+                  in "Testing" mode.
+ 401 / 403        "Who are you?" failed / "You're not allowed" (see PART 2).
+
+===============================================================================
+ End of Phase 1 explanation.
+===============================================================================
